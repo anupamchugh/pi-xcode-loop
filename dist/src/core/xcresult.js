@@ -21,7 +21,7 @@ function sanitize(value, limit = 2000) { if (!value)
     catch {
         break;
     }
-} result = result.replace(/file:\/\/[^"']+/gi, "<redacted-path>").replace(/(?:[A-Za-z]:[\\/]|\/(?:Users|Volumes|Applications|opt|private|var|tmp)\/)[^"']*/g, "<redacted-path>"); return result.slice(0, limit); }
+} result = result.replace(/file:\/\/[^"']+?\.[A-Za-z0-9]+/gi, "<redacted-path>"); const roots = /(?:[A-Za-z]:[\\/]|\\\\|\/(?:Users|Volumes|Applications|opt|private|var|tmp|home|srv|Library)\/)/gi; result = result.replace(roots, "<redacted-path>"); result = result.replace(/<redacted-path>[^\s"']*?[^\s"']\.[A-Za-z0-9]+/g, "<redacted-path>"); return result.slice(0, limit); }
 function safeRelativePath(raw, workspace) { let value = raw; try {
     value = decodeURIComponent(value);
 }
@@ -62,7 +62,7 @@ function parseLocation(value, workspace) { if (!value || typeof value !== "objec
     return undefined; return { path: safePath, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) }; }
 function stableKey(record) { return createHash("sha256").update(JSON.stringify(record)).digest("hex"); }
 function recordFrom(value, workspace, inheritedTarget, testFailure) { const status = (text(value.testStatus) ?? text(value.result))?.toLowerCase(); const isFailure = testFailure || status === "failure" || status === "failed"; const rawMessage = text(value.message) ?? text(value.description) ?? (isFailure && text(value.nodeType)?.toLowerCase() === "failure message" ? text(value.name) : undefined); if (!rawMessage)
-    return undefined; const message = sanitize(rawMessage) ?? "<redacted>"; const type = sanitize(isFailure ? "test-failure" : text(value.issueType) ?? text(value.type) ?? "diagnostic", 256) ?? "diagnostic"; const target = sanitize(text(value.target) ?? text(value.targetName) ?? inheritedTarget ?? "unknown", 256) ?? "unknown"; const parsedLocation = parseLocation(value.documentLocation ?? value.sourceLocation ?? value.location ?? (text(value.sourceURL) ? { url: value.sourceURL } : undefined), workspace); return { severity: isFailure ? "error" : severity(value.severity), type, target, message, ...(parsedLocation ? { location: parsedLocation } : {}) }; }
+    return undefined; const message = sanitize(rawMessage) ?? "<redacted>"; const type = sanitize(isFailure ? "test-failure" : text(value.issueType) ?? text(value.type) ?? "diagnostic", 256) ?? "diagnostic"; const rawTarget = text(value.target) ?? text(value.targetName) ?? inheritedTarget ?? "unknown"; const target = /^(?:file:\/\/|[A-Za-z]:[\\/]|\\\\|\/(?:Users|Volumes|Applications|opt|private|var|tmp|home|srv|Library)\/)/i.test(rawTarget) ? "<redacted-path>" : sanitize(rawTarget, 256) ?? "unknown"; const parsedLocation = parseLocation(value.documentLocation ?? value.sourceLocation ?? value.location ?? (text(value.sourceURL) ? { url: value.sourceURL } : undefined), workspace); return { severity: isFailure ? "error" : severity(value.severity), type, target, message, ...(parsedLocation ? { location: parsedLocation } : {}) }; }
 function collect(value, workspace, records, target, testFailure = false, inheritedSeverity) { if (!value || typeof value !== "object")
     return; if (Array.isArray(value)) {
     for (const item of value)
@@ -95,7 +95,10 @@ function redactedBundlePath(bundle, workspace) { const root = workspace.endsWith
 function safeError(error, bundle, workspace) { const message = error instanceof Error ? error.message.slice(0, 120) : "read error"; return message.replaceAll(bundle, redactedBundlePath(bundle, workspace)).replaceAll(/\/(?:Users|private|var|tmp)\/[^\s:]*/g, "<local-path>"); }
 export async function readIssues(bundle, workspace, signal) { const provenanceBase = { bundle: { path: redactedBundlePath(bundle, workspace) }, tool: { command: ["xcrun", "xcresulttool", "get"], commands: [["xcrun", "xcresulttool", "get", "build-results", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"], ["xcrun", "xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"]], schema: ["build-results@0.4.0", "test-results@0.4.0"] }, git: { state: "unavailable" } }; try {
     const [build, tests, digest, git] = await Promise.all([readJSON(bundle, "build-results", signal), readJSON(bundle, "test-results", signal), bundleDigest(bundle, signal), readGitSnapshot(workspace, signal)]);
-    return { ...parseIssues(build, tests, workspace), provenance: { ...provenanceBase, bundle: { path: redactedBundlePath(bundle, workspace), ...(digest ? { digest } : {}) }, git: { state: git.state, ...(git.branch ? { branch: git.branch } : {}), ...(git.commit ? { commit: git.commit } : {}) } } };
+    const parsed = parseIssues(build, tests, workspace);
+    if (digest.state !== "present")
+        parsed.diagnostics.push(`bundle digest ${digest.state}: ${digest.reason ?? "unavailable"}`);
+    return { ...parsed, provenance: { ...provenanceBase, bundle: { path: redactedBundlePath(bundle, workspace), digestState: digest.state, ...(digest.digest ? { digest: digest.digest } : {}) }, git: { state: git.state, ...(git.branch ? { branch: git.branch } : {}), ...(git.commit ? { commit: git.commit } : {}) } } };
 }
 catch (error) {
     if (signal?.aborted)
@@ -116,13 +119,16 @@ export async function bundleDigest(bundle, signal) { try {
         return;
     } if (!item.isFile())
         return; if (++count > 10_000 || (bytes += item.size) > 100_000_000)
-        throw new Error("result bundle digest bound exceeded"); const rel = relative(bundle, path).split(sep).join("/"); const pathBytes = Buffer.from(rel); const header = Buffer.alloc(1 + 4 + 8); header.writeUInt8(1, 0); header.writeUInt32BE(pathBytes.length, 1); header.writeBigUInt64BE(BigInt(item.size), 5); hash.update(header); hash.update(pathBytes); await new Promise((resolve, reject) => { const stream = createReadStream(path); const abort = () => { stream.destroy(new Error("status cancelled")); }; signal?.addEventListener("abort", abort, { once: true }); stream.on("data", (chunk) => { check(); hash.update(chunk); }); stream.on("error", reject); stream.on("end", resolve); stream.on("close", () => signal?.removeEventListener("abort", abort)); }); }
+        throw new Error("result bundle digest bound exceeded"); const rel = relative(bundle, path).split(sep).join("/"); const pathBytes = Buffer.from(rel); if (pathBytes.length > 4096)
+        throw new Error("result bundle digest path bound exceeded"); const header = Buffer.alloc(1 + 4 + 8); header.writeUInt8(1, 0); header.writeUInt32BE(pathBytes.length, 1); header.writeBigUInt64BE(BigInt(item.size), 5); hash.update(header); hash.update(pathBytes); let actual = 0; await new Promise((resolve, reject) => { const stream = createReadStream(path); const abort = () => stream.destroy(new Error("status cancelled")); signal?.addEventListener("abort", abort, { once: true }); stream.on("data", (chunk) => { check(); actual += Buffer.byteLength(chunk); hash.update(chunk); }); stream.on("error", reject); stream.on("end", resolve); stream.on("close", () => signal?.removeEventListener("abort", abort)); }); if (actual !== item.size)
+        throw new Error("result bundle content changed during digest"); }
     await visit(bundle, 0);
     check();
-    return hash.digest("hex");
+    return { state: "present", digest: hash.digest("hex"), files: count, bytes };
 }
 catch (error) {
     if (signal?.aborted)
         throw new Error("status cancelled");
-    return undefined;
+    const reason = error instanceof Error ? error.message : "digest unavailable";
+    return { state: reason.includes("bound") || reason.includes("depth") ? "truncated" : "unavailable", files: 0, bytes: 0, reason };
 } }

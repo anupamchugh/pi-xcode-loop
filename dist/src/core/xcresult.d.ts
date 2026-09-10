@@ -17,6 +17,13 @@ export interface IssueRecord {
     message: string;
     location?: IssueLocation;
 }
+export interface DigestResult {
+    state: "present" | "unavailable" | "truncated";
+    digest?: string;
+    files: number;
+    bytes: number;
+    reason?: string;
+}
 export interface IssuesReceipt {
     schema: "pi-xcode-loop.issues.v1";
     records: IssueRecord[];
@@ -26,6 +33,7 @@ export interface IssuesReceipt {
         bundle: {
             path: string;
             digest?: string;
+            digestState?: DigestResult["state"];
         };
         tool: {
             command: string[];
@@ -45,4 +53,4 @@ export declare function parseIssues(build: unknown, tests: unknown, workspace: s
 }): IssuesReceipt;
 export declare function readResultSummary(bundle: string, signal?: AbortSignal): Promise<ResultSummary>;
 export declare function readIssues(bundle: string, workspace: string, signal?: AbortSignal): Promise<IssuesReceipt>;
-export declare function bundleDigest(bundle: string, signal?: AbortSignal): Promise<string | undefined>;
+export declare function bundleDigest(bundle: string, signal?: AbortSignal): Promise<DigestResult>;
