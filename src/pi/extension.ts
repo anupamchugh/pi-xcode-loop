@@ -6,7 +6,7 @@ import { open, stat, type FileHandle } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionCommandContext } from "./pi-types.js";
 
 export const MAX_TIMEOUT_MS = 30_000; const MAX_SESSION_BYTES = 1_000_000;
-const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
+const safePath = /^\/[A-Za-z0-9._+\-/ ]+$/;
 function isSafePath(value: string): boolean { return value !== "/" && safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
 interface Options { command: "status" | "issues"; workspace: string; session?: string; result?: string; expected?: number; json: boolean; piSession?: boolean; }
 export function parseArguments(args: string, cwd: string): Options {

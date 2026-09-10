@@ -5,7 +5,7 @@ import { readResultSummary, readIssues } from "../core/xcresult.js";
 import { open, stat } from "node:fs/promises";
 export const MAX_TIMEOUT_MS = 30_000;
 const MAX_SESSION_BYTES = 1_000_000;
-const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
+const safePath = /^\/[A-Za-z0-9._+\-/ ]+$/;
 function isSafePath(value) { return value !== "/" && safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
 export function parseArguments(args, cwd) {
     if (!isSafePath(cwd))

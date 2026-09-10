@@ -5,7 +5,7 @@ import { readIssues } from "./core/xcresult.js";
 import { makeReceipt } from "./core/receipt.js";
 
 function help(): string { return "Usage: xcode-loop status --workspace <path> [--session <path>] [--result-bundle <path>] [--expect-tests <n>] [--json]\n       xcode-loop issues --workspace <path> --result-bundle <path> [--json]"; }
-const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
+const safePath = /^\/[A-Za-z0-9._+\-/ ]+$/;
 function isSafePath(value: string): boolean { return value !== "/" && safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
 function parse(args: string[]) {
   const out: { workspace?: string; session?: string; result?: string; expected?: number; json: boolean } = { json: false };

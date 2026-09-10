@@ -30,6 +30,11 @@ test("accepts the read-only issues command with an explicit result bundle", () =
   assert.equal(options.result, "/owned/Tests.xcresult");
 });
 
+test("accepts plus signs in an absolute result bundle filename", () => {
+  const options = parseArguments("issues --workspace /owned/project --result-bundle /owned/Tests+0530.xcresult", "/tmp");
+  assert.equal(options.result, "/owned/Tests+0530.xcresult");
+});
+
 test("Pi JSONL counts malformed nonblank records and stays unknown", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xcode-loop-pi-"));
   const path = join(directory, "session.jsonl");
