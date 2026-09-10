@@ -99,3 +99,11 @@ test("issue parser tolerates additive fields and malformed URLs, dedupes, and bo
   assert.equal(parsed.truncated, true);
   assert.doesNotMatch(JSON.stringify(parsed), /Users\/alice|private/);
 });
+
+test("Xcode 27 schema fields and test failure nodes are collected", () => {
+  const parsed = parseIssues({ errors: [{ issueType: "SwiftCompile", message: "error", targetName: "App", sourceURL: "file:///Users/a/project/S.swift#StartingLineNumber=7&StartingColumnNumber=2" }], warnings: [{ issueType: "warning", message: "warn", targetName: "App" }] }, { testNodes: [{ nodeType: "Test Case", name: "fails", result: "Failed", children: [{ nodeType: "Failure Message", name: "assertion", sourceLocation: { filePath: "/Users/a/project/T.swift", lineNumber: 9 } }] }] }, "/Users/a/project");
+  assert.equal(parsed.records.length, 3);
+  assert.equal(parsed.records[0]?.severity, "error");
+  assert.equal(parsed.records[0]?.location?.line, 7);
+  assert.equal(parsed.records[2]?.type, "test-failure");
+});

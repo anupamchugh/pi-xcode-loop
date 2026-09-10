@@ -60,7 +60,9 @@ async function main() {
             if (options.json)
                 console.log(JSON.stringify(receipt));
             else
-                console.log(`issues: ${receipt.records.length}${receipt.truncated ? " (truncated)" : ""}`);
+                console.log(receipt.diagnostics.length ? `unavailable: ${receipt.diagnostics[0]}` : `issues: ${receipt.records.length}${receipt.truncated ? " (truncated)" : ""}`);
+            if (receipt.diagnostics.length)
+                process.exitCode = 1;
             return;
         }
         const [session, git, result] = await Promise.all([options.session ? readSessionLog(options.session) : Promise.resolve({ completed: false, failed: false, cancelled: false, protocolError: false, malformedLines: 0, truncated: false, diagnostics: ["session log not provided"] }), readGitSnapshot(workspace), options.result ? readResultSummary(options.result) : Promise.resolve(undefined)]);

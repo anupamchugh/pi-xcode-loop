@@ -10,6 +10,7 @@ const MAX_RECORDS = 10_000;
 export function parseResultSummary(stdout) { const value = JSON.parse(stdout); const executed = value.totalTestCount; const failed = value.failedTests; if (typeof executed !== "number" || !Number.isSafeInteger(executed) || executed < 0 || typeof failed !== "number" || !Number.isSafeInteger(failed) || failed < 0 || failed > executed)
     throw new Error("invalid xcresult summary"); return { state: "present", executed, failed }; }
 function text(value) { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
+function integer(value) { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
 function severity(value) { const item = text(value)?.toLowerCase(); return item === "error" || item === "failure" ? "error" : item === "warning" ? "warning" : item === "notice" || item === "info" ? "notice" : "unknown"; }
 function safeRelativePath(raw, workspace) { let value = raw; try {
     value = decodeURIComponent(value);
@@ -26,33 +27,40 @@ else if (!value.includes("/") || !/\.[A-Za-z0-9]+$/.test(value))
     return undefined; return parts.join("/") || undefined; }
 function parseLocation(value, workspace) { if (!value || typeof value !== "object")
     return undefined; const object = value; const raw = text(object.url) ?? text(object.path) ?? text(object.filePath); if (!raw)
-    return undefined; let path = raw; let line; let column; if (raw.startsWith("file:")) {
+    return undefined; let path = raw; let line = integer(object.lineNumber); let column = integer(object.columnNumber); if (raw.startsWith("file:")) {
     try {
         const parsed = new URL(raw);
         if (parsed.protocol !== "file:")
             return undefined;
-        path = parsed.pathname;
+        path = parsed.pathname + parsed.hash;
+        line = integer(Number(parsed.searchParams.get("StartingLineNumber"))) ?? line;
+        column = integer(Number(parsed.searchParams.get("StartingColumnNumber"))) ?? column;
     }
     catch {
         return undefined;
     }
+} const fragment = path.indexOf("#"); if (fragment >= 0) {
+    const query = new URLSearchParams(path.slice(fragment + 1));
+    path = path.slice(0, fragment);
+    line = integer(Number(query.get("StartingLineNumber"))) ?? line;
+    column = integer(Number(query.get("StartingColumnNumber"))) ?? column;
 } const match = path.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/); if (match?.[1]) {
     path = match[1];
-    line = match[2] ? Number(match[2]) : undefined;
-    column = match[3] ? Number(match[3]) : undefined;
+    line = match[2] ? Number(match[2]) : line;
+    column = match[3] ? Number(match[3]) : column;
 } const safePath = safeRelativePath(path, workspace); if (!safePath)
     return undefined; return { path: safePath, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) }; }
-function stableKey(record) { return createHash("sha256").update(JSON.stringify(record)).digest("hex").slice(0, 32); }
-function recordFrom(value, workspace, inheritedTarget, testFailure) { const rawMessage = text(value.message) ?? text(value.description); if (!rawMessage)
-    return undefined; const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; const message = rawMessage.replaceAll(root, "<workspace>").replaceAll(/\/(?:Users|private|var|tmp)\/[^\s:]*/g, "<local-path>"); const status = text(value.testStatus)?.toLowerCase(); const isFailure = testFailure || status === "failure" || status === "failed"; const type = isFailure ? "test-failure" : text(value.issueType) ?? text(value.type) ?? "diagnostic"; const target = text(value.target) ?? inheritedTarget ?? "unknown"; const parsedLocation = parseLocation(value.documentLocation ?? value.sourceLocation ?? value.location, workspace); return { severity: isFailure ? "error" : severity(value.severity), type, target, message, ...(parsedLocation ? { location: parsedLocation } : {}) }; }
-function collect(value, workspace, records, target, testFailure = false) { if (!value || typeof value !== "object")
+function stableKey(record) { return createHash("sha256").update(JSON.stringify(record)).digest("hex"); }
+function recordFrom(value, workspace, inheritedTarget, testFailure) { const status = (text(value.testStatus) ?? text(value.result))?.toLowerCase(); const isFailure = testFailure || status === "failure" || status === "failed"; const rawMessage = text(value.message) ?? text(value.description) ?? (isFailure && text(value.nodeType)?.toLowerCase() === "failure message" ? text(value.name) : undefined); if (!rawMessage)
+    return undefined; const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; const message = rawMessage.replaceAll(root, "<workspace>").replaceAll(/\/(?:Users|Volumes|Applications|private|var|tmp)\/[^\s:]*/g, "<local-path>").slice(0, 2000); const type = isFailure ? "test-failure" : text(value.issueType) ?? text(value.type) ?? "diagnostic"; const target = text(value.target) ?? text(value.targetName) ?? inheritedTarget ?? "unknown"; const parsedLocation = parseLocation(value.documentLocation ?? value.sourceLocation ?? value.location ?? (text(value.sourceURL) ? { url: value.sourceURL } : undefined), workspace); return { severity: isFailure ? "error" : severity(value.severity), type, target: target.slice(0, 200), message, ...(parsedLocation ? { location: parsedLocation } : {}) }; }
+function collect(value, workspace, records, target, testFailure = false, inheritedSeverity) { if (!value || typeof value !== "object")
     return; if (Array.isArray(value)) {
     for (const item of value)
-        collect(item, workspace, records, target, testFailure);
+        collect(item, workspace, records, target, testFailure, inheritedSeverity);
     return;
-} const object = value; const namedTarget = text(object.target) ?? text(object.targetName) ?? text(object.testTarget) ?? ((Array.isArray(object.tests) || Array.isArray(object.testNodes)) ? text(object.name) : undefined); const nextTarget = namedTarget ?? target; const status = text(object.testStatus)?.toLowerCase(); const nextFailure = testFailure || status === "failure" || status === "failed"; const candidate = recordFrom(object, workspace, nextTarget, nextFailure); if (candidate && (text(object.issueType) || text(object.severity) || nextFailure || text(object.failureSummaries)))
+} const object = value; const namedTarget = text(object.target) ?? text(object.targetName) ?? text(object.testTarget) ?? ((Array.isArray(object.tests) || Array.isArray(object.testNodes) || text(object.nodeType)?.toLowerCase() === "test case") ? text(object.name) : undefined); const nextTarget = namedTarget ?? target; const status = (text(object.testStatus) ?? text(object.result))?.toLowerCase(); const nextFailure = testFailure || status === "failure" || status === "failed" || text(object.nodeType)?.toLowerCase() === "failure message"; const candidate = recordFrom({ ...object, severity: object.severity ?? inheritedSeverity }, workspace, nextTarget, nextFailure); if (candidate && (text(object.issueType) || text(object.severity) || inheritedSeverity || nextFailure || text(object.failureSummaries) || text(object.sourceURL)))
     records.push(candidate); for (const [key, child] of Object.entries(object))
-    collect(child, workspace, records, nextTarget, nextFailure || key === "failureSummaries" || key === "failureSummary"); }
+    collect(child, workspace, records, nextTarget, nextFailure || key === "failureSummaries" || key === "failureSummary", key === "errors" ? "error" : key === "warnings" || key === "analyzerWarnings" ? "warning" : inheritedSeverity); }
 export function parseIssues(build, tests, workspace, options = {}) { const max = Math.max(1, Math.min(options.maxRecords ?? MAX_RECORDS, MAX_RECORDS)); const candidates = []; collect(build, workspace, candidates); collect(tests, workspace, candidates); const records = []; const seen = new Set(); let truncated = false; for (const candidate of candidates) {
     const key = stableKey(candidate);
     if (seen.has(key))

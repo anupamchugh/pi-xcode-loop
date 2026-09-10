@@ -189,7 +189,7 @@ export default function xcodeLoopExtension(pi) {
                 try {
                     if (effective.command === "issues") {
                         const issues = await withTimeout(runIssues(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort());
-                        ctx.ui.notify(effective.json ? JSON.stringify(issues) : `issues: ${issues.records.length}${issues.truncated ? " (truncated)" : ""}`, issues.diagnostics.length ? "error" : "info");
+                        ctx.ui.notify(effective.json ? JSON.stringify(issues) : (issues.diagnostics.length ? `unavailable: ${issues.diagnostics[0]}` : `issues: ${issues.records.length}${issues.truncated ? " (truncated)" : ""}`), issues.diagnostics.length ? "error" : "info");
                     }
                     else {
                         const receipt = await withTimeout(runStatus(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort());
