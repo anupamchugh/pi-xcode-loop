@@ -1,0 +1,15 @@
+#!/bin/sh
+if [ "${XCODE_LOOP_STUB_MODE:-}" = "fail" ]; then
+  printf '%s\n' "${XCODE_LOOP_STUB_STDERR:-xcrun failed}" >&2
+  exit 23
+fi
+if [ "${XCODE_LOOP_STUB_MODE:-}" = "hang" ]; then
+  (trap '' TERM; while :; do sleep 1; done) &
+  printf '%s\n' "$!" > "$XCODE_LOOP_STUB_PID_FILE"
+  wait
+fi
+case "$*" in
+  *"build-results"*) cat "$XCODE_LOOP_FIXTURE/build-results.json" ;;
+  *"test-results"*) cat "$XCODE_LOOP_FIXTURE/test-results.json" ;;
+  *) printf '%s\n' "unknown fake xcrun command" >&2; exit 2 ;;
+esac

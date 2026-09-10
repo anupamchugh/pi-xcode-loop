@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { relative, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { readGitSnapshot } from "./git.js";
 const MAX_JSON_BYTES = 2_000_000; const MAX_RECORDS = 10_000;
 export interface ResultSummary { state: "present" | "unavailable"; executed?: number; failed?: number; detail?: string; }
@@ -12,49 +12,77 @@ export interface DigestResult { state: "present" | "unavailable" | "truncated"; 
 export interface IssuesReceipt { schema: "pi-xcode-loop.issues.v1"; records: IssueRecord[]; truncated: boolean; diagnostics: string[]; provenance?: { bundle: { path: string; digest?: string; digestState?: DigestResult["state"] }; tool: { command: string[]; commands: string[][]; schema: string[] }; git: { state: "present" | "unavailable"; branch?: string; commit?: string } }; }
 export function parseResultSummary(stdout: string): ResultSummary { const value = JSON.parse(stdout) as Record<string, unknown>; const executed = value.totalTestCount; const failed = value.failedTests; if (typeof executed !== "number" || !Number.isSafeInteger(executed) || executed < 0 || typeof failed !== "number" || !Number.isSafeInteger(failed) || failed < 0 || failed > executed) throw new Error("invalid xcresult summary"); return { state: "present", executed, failed }; }
 function text(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
-function integer(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function integer(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined; }
 function severity(value: unknown): IssueRecord["severity"] { const item = text(value)?.toLowerCase(); return item === "error" || item === "failure" ? "error" : item === "warning" ? "warning" : item === "notice" || item === "info" ? "notice" : "unknown"; }
-function decode(value: string): string { try { return decodeURIComponent(value); } catch { return value; } }
 function pathStart(value: string, index: number): boolean { return index === 0 || /[\s([{"'=,:;]/.test(value[index - 1] ?? ""); }
-function consumePath(value: string, start: number): number {
-  const quoted = /["']/.test(value[start - 1] ?? "");
+function consumePath(value: string, start: number, kind: "url" | "path"): number {
+  const quote = value[start - 1]; const quoted = quote === '"' || quote === "'";
   let end = start;
   while (end < value.length && !/[<>|;\n\r]/.test(value[end] ?? "")) {
-    if (quoted && value[end] === value[start - 1]) return end;
+    if (quoted && value[end] === quote) return end;
+    if (!quoted && /\s/.test(value[end] ?? "") && kind === "url") break;
     end++;
+  }
+  if (kind === "url") {
+    while (end > start && /[.,!?\])}]/.test(value[end - 1] ?? "")) end--;
+    return end;
   }
   const candidate = value.slice(start, end);
   const ext = candidate.search(/\.[A-Za-z0-9]{1,16}(?=$|[:\s)\]}>,!?])/);
   if (ext >= 0) return start + ext + candidate.slice(ext).match(/\.[A-Za-z0-9]{1,16}/)![0].length;
-  return candidate.search(/\s/) >= 0 ? start + candidate.search(/\s/) : end;
+  if (!quoted) {
+    // An unquoted path may have spaces in parent directories, but prose after
+    // its final slash-delimited component is ambiguous. Preserve that prose;
+    // callers needing spaces in the final component must quote the path.
+    const finalSlash = candidate.lastIndexOf("/");
+    const tail = finalSlash >= 0 ? candidate.slice(finalSlash + 1) : candidate;
+    const firstSpace = tail.search(/\s/);
+    if (firstSpace >= 0) return start + finalSlash + 1 + firstSpace;
+  }
+  return end;
 }
 /** Redacts path tokens while retaining surrounding human prose. */
 export function sanitize(value: string | undefined, limit = 2000): string | undefined {
   if (!value) return undefined;
-  const input = decode(value);
+  // Decode only structured locations; decoding the whole message would turn
+  // `%20` inside a file URL into prose whitespace and prematurely end a token.
+  const input = value;
   let out = ""; let i = 0;
   while (i < input.length) {
     const rest = input.slice(i);
     const file = rest.match(/^file:\/\//i);
-    const posix = rest.match(/^\/(?:[^\s/]+\/)+[^\s]*/);
+    const posix = rest.match(/^\/[^<>|;\n\r]+/);
     const drive = rest.match(/^[A-Za-z]:[\\/][^<>|;\n\r]*/);
     const unc = rest.match(/^\\\\[^\\/\s]+[\\/][^<>|;\n\r]*/);
     if (file && pathStart(input, i)) {
-      let end = consumePath(input, i);
-      const marker = [input.indexOf("?", i), input.indexOf("#", i)].filter((value) => value >= 0 && !/[<>|;\n\r"']/.test(input.slice(i, value))).sort((a, b) => a - b)[0];
-      if (marker !== undefined) { end = marker; while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? "")) end++; }
-      while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? "")) end++;
+      const end = consumePath(input, i, "url");
       out += "<redacted-path>"; i = end; continue;
     }
     if ((posix || drive || unc) && pathStart(input, i)) {
-      const end = consumePath(input, i); out += "<redacted-path>"; i = end; continue;
+      const end = consumePath(input, i, "path"); out += "<redacted-path>"; i = end; continue;
     }
     out += input[i++];
   }
   return out.slice(0, limit);
 }
-function safeRelativePath(raw: string, workspace: string): string | undefined { let value = raw; try { value = decodeURIComponent(value); } catch { return undefined; } const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; if (value.startsWith("/")) { if (!(value === root || value.startsWith(`${root}/`))) return undefined; value = value.slice(root.length + (value === root ? 0 : 1)); } else if (!value.includes("/") || !/\.[A-Za-z0-9]+$/.test(value)) return undefined; const parts = value.replaceAll("\\", "/").split("/").filter(Boolean); if (parts.includes("..") || parts.includes(".")) return undefined; return parts.join("/") || undefined; }
-function parseLocation(value: unknown, workspace: string): IssueLocation | undefined { if (!value || typeof value !== "object") return undefined; const object = value as Record<string, unknown>; const raw = text(object.url) ?? text(object.path) ?? text(object.filePath); if (!raw) return undefined; let path = raw; let line = integer(object.lineNumber); let column = integer(object.columnNumber); if (raw.startsWith("file:")) { try { const parsed = new URL(raw); if (parsed.protocol !== "file:") return undefined; path = parsed.pathname + parsed.hash; line = integer(Number(parsed.searchParams.get("StartingLineNumber"))) ?? line; column = integer(Number(parsed.searchParams.get("StartingColumnNumber"))) ?? column; } catch { return undefined; } } const fragment = path.indexOf("#"); if (fragment >= 0) { const query = new URLSearchParams(path.slice(fragment + 1)); path = path.slice(0, fragment); line = integer(Number(query.get("StartingLineNumber"))) ?? line; column = integer(Number(query.get("StartingColumnNumber"))) ?? column; } const match = path.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/); if (match?.[1]) { path = match[1]; line = match[2] ? Number(match[2]) : line; column = match[3] ? Number(match[3]) : column; } const safePath = safeRelativePath(path, workspace); if (!safePath) return undefined; return { path: safePath, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) }; }
+function safeRelativePath(raw: string, workspace: string): string | undefined {
+  let value = raw;
+  try { value = decodeURIComponent(value); } catch { return undefined; }
+  const root = resolve(workspace);
+  if (root === "/") return undefined;
+  if (value.startsWith("/")) {
+    const candidate = resolve(value);
+    const relativePath = relative(root, candidate);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || relativePath.startsWith(sep)) return undefined;
+    value = relativePath;
+  } else {
+    if (!value.includes("/") || !/\.[A-Za-z0-9]+$/.test(value)) return undefined;
+  }
+  const parts = value.replaceAll("\\", "/").split("/").filter(Boolean);
+  if (parts.includes("..") || parts.includes(".")) return undefined;
+  return parts.join("/") || undefined;
+}
+function parseLocation(value: unknown, workspace: string): IssueLocation | undefined { if (!value || typeof value !== "object") return undefined; const object = value as Record<string, unknown>; const raw = text(object.url) ?? text(object.path) ?? text(object.filePath); if (!raw) return undefined; let path = raw; let line = integer(object.lineNumber); let column = integer(object.columnNumber); if (raw.startsWith("file:")) { try { const parsed = new URL(raw); if (parsed.protocol !== "file:") return undefined; path = parsed.pathname; line = integer(Number(parsed.searchParams.get("StartingLineNumber"))) ?? line; column = integer(Number(parsed.searchParams.get("StartingColumnNumber"))) ?? column; const fragmentQuery = parsed.hash.startsWith("#") ? new URLSearchParams(parsed.hash.slice(1)) : undefined; line = integer(Number(fragmentQuery?.get("StartingLineNumber"))) ?? line; column = integer(Number(fragmentQuery?.get("StartingColumnNumber"))) ?? column; } catch { return undefined; } } const fragment = path.indexOf("#"); if (fragment >= 0) { const query = new URLSearchParams(path.slice(fragment + 1)); path = path.slice(0, fragment); line = integer(Number(query.get("StartingLineNumber"))) ?? line; column = integer(Number(query.get("StartingColumnNumber"))) ?? column; } const match = path.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/); if (match?.[1]) { path = match[1]; line = match[2] ? integer(Number(match[2])) : line; column = match[3] ? integer(Number(match[3])) : column; } const safePath = safeRelativePath(path, workspace); if (!safePath) return undefined; return { path: safePath, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) }; }
 function stableKey(record: Omit<IssueRecord, "key">): string { return createHash("sha256").update(JSON.stringify(record)).digest("hex"); }
 function recordFrom(value: Record<string, unknown>, workspace: string, inheritedTarget: string | undefined, testFailure: boolean): Omit<IssueRecord, "key"> | undefined { const status = (text(value.testStatus) ?? text(value.result))?.toLowerCase(); const isFailure = testFailure || status === "failure" || status === "failed"; const rawMessage = text(value.message) ?? text(value.description) ?? (isFailure && text(value.nodeType)?.toLowerCase() === "failure message" ? text(value.name) : undefined); if (!rawMessage) return undefined; const message = sanitize(rawMessage) ?? "<redacted>"; const type = sanitize(isFailure ? "test-failure" : text(value.issueType) ?? text(value.type) ?? "diagnostic", 256) ?? "diagnostic"; const rawTarget = text(value.target) ?? text(value.targetName) ?? inheritedTarget ?? "unknown"; const target = sanitize(rawTarget, 256) ?? "unknown"; const parsedLocation = parseLocation(value.documentLocation ?? value.sourceLocation ?? value.location ?? (text(value.sourceURL) ? { url: value.sourceURL } : undefined), workspace); return { severity: isFailure ? "error" : severity(value.severity), type, target, message, ...(parsedLocation ? { location: parsedLocation } : {}) }; }
 function collect(value: unknown, workspace: string, records: Omit<IssueRecord, "key">[], target?: string, testFailure = false, inheritedSeverity?: string): void { if (!value || typeof value !== "object") return; if (Array.isArray(value)) { for (const item of value) collect(item, workspace, records, target, testFailure, inheritedSeverity); return; } const object = value as Record<string, unknown>; const namedTarget = text(object.target) ?? text(object.targetName) ?? text(object.testTarget) ?? ((Array.isArray(object.tests) || Array.isArray(object.testNodes) || text(object.nodeType)?.toLowerCase() === "test case") ? text(object.name) : undefined); const nextTarget = namedTarget ?? target; const status = (text(object.testStatus) ?? text(object.result))?.toLowerCase(); const nextFailure = testFailure || status === "failure" || status === "failed" || text(object.nodeType)?.toLowerCase() === "failure message"; const candidate = recordFrom({ ...object, severity: object.severity ?? inheritedSeverity }, workspace, nextTarget, nextFailure); if (candidate && (text(object.issueType) || text(object.severity) || inheritedSeverity || nextFailure || text(object.failureSummaries) || text(object.sourceURL))) records.push(candidate); for (const [key, child] of Object.entries(object)) collect(child, workspace, records, nextTarget, nextFailure || key === "failureSummaries" || key === "failureSummary", key === "errors" ? "error" : key === "warnings" || key === "analyzerWarnings" ? "warning" : inheritedSeverity); }
@@ -65,9 +93,12 @@ async function runCommand(file: string, args: string[], signal?: AbortSignal, ma
   return await new Promise((resolve, reject) => {
     const child = spawn(file, args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "", tooLarge = false;
-    const append = (kind: "stdout" | "stderr", chunk: Buffer | string) => { const bytes = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length; if (Buffer.byteLength(kind === "stdout" ? stdout : stderr) + bytes > maxBytes) { tooLarge = true; if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch {} } return; } if (kind === "stdout") stdout += chunk.toString(); else stderr += chunk.toString(); };
-    const abort = () => { if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch {} } };
-    const cleanup = () => signal?.removeEventListener("abort", abort);
+    let killTimer: NodeJS.Timeout | undefined;
+    let terminated = false;
+    const terminate = () => { if (terminated || !child.pid) return; terminated = true; try { process.kill(-child.pid, "SIGTERM"); } catch {} killTimer = setTimeout(() => { try { process.kill(-child.pid!, "SIGKILL"); } catch {} }, 250); };
+    const append = (kind: "stdout" | "stderr", chunk: Buffer | string) => { const bytes = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length; if (Buffer.byteLength(kind === "stdout" ? stdout : stderr) + bytes > maxBytes) { tooLarge = true; terminate(); return; } if (kind === "stdout") stdout += chunk.toString(); else stderr += chunk.toString(); };
+    const abort = () => terminate();
+    const cleanup = () => { signal?.removeEventListener("abort", abort); if (killTimer && !terminated) clearTimeout(killTimer); };
     child.stdout.on("data", (c: Buffer | string) => append("stdout", c)); child.stderr.on("data", (c: Buffer | string) => append("stderr", c));
     child.once("error", (error) => { cleanup(); reject(error); });
     child.once("close", (code, sig) => { cleanup(); if (signal?.aborted) reject(new Error("status cancelled")); else if (tooLarge) reject(new Error("xcresult output exceeded bound")); else if (code !== 0) reject(new Error((stderr || `command exited ${code ?? sig}`).slice(0, 240))); else resolve({ stdout, stderr }); });
@@ -76,8 +107,15 @@ async function runCommand(file: string, args: string[], signal?: AbortSignal, ma
 }
 export async function readResultSummary(bundle: string, signal?: AbortSignal): Promise<ResultSummary> { try { const { stdout } = await runCommand("xcrun", ["xcresulttool", "get", "test-results", "summary", "--schema-version", "0.4.0", "--path", bundle, "--compact"], signal, 1_000_000); return parseResultSummary(stdout); } catch (error) { return { state: "unavailable", detail: `result bundle unavailable: ${error instanceof Error ? error.message.slice(0, 120) : "read error"}` }; } }
 async function readJSON(bundle: string, kind: "build-results" | "test-results", signal?: AbortSignal): Promise<unknown> { const command = kind === "build-results" ? ["xcresulttool", "get", "build-results", "--schema-version", "0.4.0", "--path", bundle, "--compact"] : ["xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", bundle, "--compact"]; const { stdout } = await runCommand("xcrun", command, signal); return JSON.parse(stdout); }
-function redactedBundlePath(bundle: string, workspace: string): string { const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; return bundle === root ? "<workspace>" : bundle.startsWith(`${root}/`) ? `<workspace>/${bundle.slice(root.length + 1)}` : "<result-bundle>"; }
-function safeError(error: unknown, bundle: string, workspace: string): string { const message = error instanceof Error ? error.message.slice(0, 120) : "read error"; return message.replaceAll(bundle, redactedBundlePath(bundle, workspace)).replaceAll(/\/(?:Users|private|var|tmp)\/[^\s:]*/g, "<local-path>"); }
+function redactedBundlePath(bundle: string, workspace: string): string {
+  const root = resolve(workspace);
+  if (root === "/") return "<result-bundle>";
+  const candidate = resolve(bundle);
+  const relativePath = relative(root, candidate);
+  if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || relativePath.startsWith(sep)) return "<result-bundle>";
+  return `<workspace>/${relativePath.split(sep).join("/")}`;
+}
+function safeError(error: unknown, bundle: string, workspace: string): string { const message = error instanceof Error ? error.message.slice(0, 120) : "read error"; const withBundle = message.replaceAll(bundle, redactedBundlePath(bundle, workspace)); return sanitize(withBundle, 120) ?? "read error"; }
 export async function readIssues(bundle: string, workspace: string, signal?: AbortSignal): Promise<IssuesReceipt> { const provenanceBase = { bundle: { path: redactedBundlePath(bundle, workspace) }, tool: { command: ["xcrun", "xcresulttool", "get"], commands: [["xcrun", "xcresulttool", "get", "build-results", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"], ["xcrun", "xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"]], schema: ["build-results@0.4.0", "test-results@0.4.0"] }, git: { state: "unavailable" as const } }; try { const [build, tests, digest, git] = await Promise.all([readJSON(bundle, "build-results", signal), readJSON(bundle, "test-results", signal), bundleDigest(bundle, signal), readGitSnapshot(workspace, signal)]); const parsed = parseIssues(build, tests, workspace); if (digest.state !== "present") parsed.diagnostics.push(`bundle digest ${digest.state}: ${digest.reason ?? "unavailable"}`); return { ...parsed, provenance: { ...provenanceBase, bundle: { path: redactedBundlePath(bundle, workspace), digestState: digest.state, ...(digest.digest ? { digest: digest.digest } : {}) }, git: { state: git.state, ...(git.branch ? { branch: git.branch } : {}), ...(git.commit ? { commit: git.commit } : {}) } } }; } catch (error) { if (signal?.aborted) throw new Error("status cancelled"); return { schema: "pi-xcode-loop.issues.v1", records: [], truncated: false, diagnostics: [`result bundle unavailable: ${safeError(error, bundle, workspace)}`], provenance: provenanceBase }; } }
 export interface DigestLimits { maxEntries: number; maxBytes: number; maxDepth: number; maxPathBytes: number; }
 export const DEFAULT_DIGEST_LIMITS: DigestLimits = { maxEntries: 100_000, maxBytes: 512 * 1024 * 1024, maxDepth: 64, maxPathBytes: 16_384 };

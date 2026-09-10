@@ -128,6 +128,46 @@ test("path tokenizer redacts arbitrary roots and preserves prose", () => {
   assert.notEqual(sanitize("error /mnt/a.swift:1"), sanitize("error /mnt/a.swift:2"));
 });
 
+test("root paths and spaced extensionless paths are redacted without key collapse", () => {
+  const values = ["/secret", "/.env", "/private/Secret Project/cache"];
+  for (const value of values) assert.doesNotMatch(sanitize(`diagnostic ${value} after`) ?? "", /secret|\.env|Secret Project|cache/);
+  const first = parseIssues({ errors: [{ message: "/secret first" }] }, undefined, "/workspace").records[0];
+  const second = parseIssues({ errors: [{ message: "/.env second" }] }, undefined, "/workspace").records[0];
+  assert.notEqual(first?.key, second?.key);
+});
+
+test("unquoted spaced paths preserve trailing prose and quoted paths retain spaces", () => {
+  const first = sanitize("/mnt/Secret Directory/token first");
+  const second = sanitize("/mnt/Secret Directory/token second");
+  assert.equal(first, "<redacted-path> first");
+  assert.equal(second, "<redacted-path> second");
+  assert.notEqual(first, second);
+  assert.equal(sanitize('"/mnt/Secret Directory/token" then retry'), '"<redacted-path>" then retry');
+  const records = parseIssues({ errors: [{ message: "/mnt/Secret Directory/token first" }, { message: "/mnt/Secret Directory/token second" }] }, undefined, "/workspace").records;
+  assert.notEqual(records[0]?.key, records[1]?.key);
+});
+
+test("error text sanitizer covers volume and home paths", () => {
+  const output = sanitize("failed /Volumes/Secret Disk/customer/token.txt and /home/alice/key then retry") ?? "";
+  assert.doesNotMatch(output, /Volumes|Secret Disk|customer|token\.txt|home|alice|key/);
+  assert.match(output, /then retry/);
+});
+
+test("location coordinates require positive present values", () => {
+  const parsed = parseIssues({ errors: [
+    { message: "zero", sourceURL: "file:///workspace/App.swift#StartingLineNumber=0&StartingColumnNumber=0" },
+    { message: "positive", sourceURL: "file:///workspace/App.swift#StartingLineNumber=4&StartingColumnNumber=2" },
+  ] }, undefined, "/workspace");
+  assert.deepEqual(parsed.records[0]?.location, { path: "App.swift" });
+  assert.deepEqual(parsed.records[1]?.location, { path: "App.swift", line: 4, column: 2 });
+});
+
+test("root workspace never turns an absolute source URL into a relative private path", () => {
+  const parsed = parseIssues({ errors: [{ message: "private", sourceURL: "file:///Users/alice/private.swift:4:2" }] }, undefined, "/");
+  assert.equal(parsed.records[0]?.location, undefined);
+  assert.doesNotMatch(JSON.stringify(parsed), /Users\/alice|private\.swift/);
+});
+
 test("digest framing distinguishes ambiguous path and content boundaries", async () => {
   const first = await mkdtemp(join(tmpdir(), "xcode-loop-frame-a-")); const second = await mkdtemp(join(tmpdir(), "xcode-loop-frame-b-"));
   await writeFile(join(first, "a"), "bc"); await writeFile(join(second, "ab"), "c");

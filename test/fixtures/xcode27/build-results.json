@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "0.4.0",
+  "title": "Build",
+  "startTime": 1789009200,
+  "endTime": 1789009205,
+  "destination": {
+    "deviceId": "macos-host",
+    "deviceName": "This Mac",
+    "modelName": "Mac",
+    "osVersion": "15.6",
+    "platform": "macOS",
+    "platformIdentifier": "com.apple.platform.macosx",
+    "architecture": "arm64"
+  },
+  "analyzerWarnings": [],
+  "errors": [
+    {
+      "issueType": "SwiftCompile",
+      "message": "cannot find /Users/alice/private.swift",
+      "targetName": "GlintApp",
+      "sourceURL": "file:///fixture/workspace/Sources/App.swift#StartingLineNumber=12&StartingColumnNumber=4"
+    }
+  ],
+  "warnings": [
+    {
+      "issueType": "warning",
+      "message": "see /Volumes/Private Disk/cache.swift and C:\\Users\\alice\\secret.swift",
+      "targetName": "GlintApp"
+    }
+  ]
+}

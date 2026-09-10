@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "0.4.0",
+  "title": "Test",
+  "startTime": 1789009200,
+  "endTime": 1789009205,
+  "devices": [
+    {
+      "deviceId": "macos-host",
+      "deviceName": "This Mac",
+      "modelName": "Mac",
+      "osVersion": "15.6",
+      "platform": "macOS",
+      "platformIdentifier": "com.apple.platform.macosx",
+      "architecture": "arm64"
+    }
+  ],
+  "testPlanConfigurations": [
+    {
+      "configurationId": "debug",
+      "configurationName": "Debug",
+      "testTargets": ["GlintAppTests"]
+    }
+  ],
+  "testNodes": [
+    {
+      "nodeType": "Test Case",
+      "name": "GlintAppTests",
+      "children": [
+        {
+          "nodeType": "Test Case",
+          "name": "testPrivatePath",
+          "result": "Failed",
+          "children": [
+            {
+              "nodeType": "Failure Message",
+              "name": "assertion failed at /Users/alice/private.swift:27:3",
+              "sourceLocation": {
+                "filePath": "/fixture/workspace/Tests/AppTests.swift",
+                "lineNumber": 27,
+                "columnNumber": 3
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

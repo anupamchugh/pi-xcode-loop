@@ -20,6 +20,8 @@ test("accepts only safe explicit flags and rejects injection-like arguments", ()
   assert.equal(parseArguments('status --workspace "/owned/project folder"', "/tmp").workspace, "/owned/project folder");
   assert.throws(() => parseArguments("status --session /owned/./session.jsonl", "/tmp"), /absolute safe path/);
   assert.throws(() => parseArguments("status --session /owned/logs/../session.jsonl", "/tmp"), /absolute safe path/);
+  assert.throws(() => parseArguments("status", "/"), /absolute safe path/);
+  assert.throws(() => parseArguments("status --workspace /", "/tmp"), /absolute safe path/);
 });
 
 test("accepts the read-only issues command with an explicit result bundle", () => {
@@ -89,6 +91,13 @@ test("handler emits concise private-safe output and honors cancellation", async 
   const controller = new AbortController(); controller.abort();
   await handler("status --json", { cwd: "/private/project", signal: controller.signal, sessionManager: { getSessionFile: () => undefined }, ui: { notify(message: string) { messages.push(message); } } });
   assert.equal(messages.length, 1); assert.equal(messages[0], "status cancelled"); assert.doesNotMatch(messages[0] ?? "", /private\/project|prompt|tool/);
+});
+
+test("Pi handler rejects a root cwd before reading evidence", async () => {
+  let handler!: (args: string, ctx: any) => Promise<void>; const messages: string[] = [];
+  extension({ registerCommand(_name, options) { handler = options.handler; } });
+  await handler("status", { cwd: "/", ui: { notify(message: string) { messages.push(message); } } });
+  assert.deepEqual(messages, ["xcode-loop status unavailable"]);
 });
 
 test("session I/O errors never disclose workspace or session paths", async () => {

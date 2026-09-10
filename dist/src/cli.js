@@ -5,7 +5,7 @@ import { readIssues } from "./core/xcresult.js";
 import { makeReceipt } from "./core/receipt.js";
 function help() { return "Usage: xcode-loop status --workspace <path> [--session <path>] [--result-bundle <path>] [--expect-tests <n>] [--json]\n       xcode-loop issues --workspace <path> --result-bundle <path> [--json]"; }
 const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
-function isSafePath(value) { return safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
+function isSafePath(value) { return value !== "/" && safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
 function parse(args) {
     const out = { json: false };
     for (let i = 0; i < args.length; i++) {

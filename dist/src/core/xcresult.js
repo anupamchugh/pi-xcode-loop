@@ -2,65 +2,71 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { relative, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { readGitSnapshot } from "./git.js";
 const MAX_JSON_BYTES = 2_000_000;
 const MAX_RECORDS = 10_000;
 export function parseResultSummary(stdout) { const value = JSON.parse(stdout); const executed = value.totalTestCount; const failed = value.failedTests; if (typeof executed !== "number" || !Number.isSafeInteger(executed) || executed < 0 || typeof failed !== "number" || !Number.isSafeInteger(failed) || failed < 0 || failed > executed)
     throw new Error("invalid xcresult summary"); return { state: "present", executed, failed }; }
 function text(value) { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
-function integer(value) { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined; }
+function integer(value) { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined; }
 function severity(value) { const item = text(value)?.toLowerCase(); return item === "error" || item === "failure" ? "error" : item === "warning" ? "warning" : item === "notice" || item === "info" ? "notice" : "unknown"; }
-function decode(value) { try {
-    return decodeURIComponent(value);
-}
-catch {
-    return value;
-} }
 function pathStart(value, index) { return index === 0 || /[\s([{"'=,:;]/.test(value[index - 1] ?? ""); }
-function consumePath(value, start) {
-    const quoted = /["']/.test(value[start - 1] ?? "");
+function consumePath(value, start, kind) {
+    const quote = value[start - 1];
+    const quoted = quote === '"' || quote === "'";
     let end = start;
     while (end < value.length && !/[<>|;\n\r]/.test(value[end] ?? "")) {
-        if (quoted && value[end] === value[start - 1])
+        if (quoted && value[end] === quote)
             return end;
+        if (!quoted && /\s/.test(value[end] ?? "") && kind === "url")
+            break;
         end++;
+    }
+    if (kind === "url") {
+        while (end > start && /[.,!?\])}]/.test(value[end - 1] ?? ""))
+            end--;
+        return end;
     }
     const candidate = value.slice(start, end);
     const ext = candidate.search(/\.[A-Za-z0-9]{1,16}(?=$|[:\s)\]}>,!?])/);
     if (ext >= 0)
         return start + ext + candidate.slice(ext).match(/\.[A-Za-z0-9]{1,16}/)[0].length;
-    return candidate.search(/\s/) >= 0 ? start + candidate.search(/\s/) : end;
+    if (!quoted) {
+        // An unquoted path may have spaces in parent directories, but prose after
+        // its final slash-delimited component is ambiguous. Preserve that prose;
+        // callers needing spaces in the final component must quote the path.
+        const finalSlash = candidate.lastIndexOf("/");
+        const tail = finalSlash >= 0 ? candidate.slice(finalSlash + 1) : candidate;
+        const firstSpace = tail.search(/\s/);
+        if (firstSpace >= 0)
+            return start + finalSlash + 1 + firstSpace;
+    }
+    return end;
 }
 /** Redacts path tokens while retaining surrounding human prose. */
 export function sanitize(value, limit = 2000) {
     if (!value)
         return undefined;
-    const input = decode(value);
+    // Decode only structured locations; decoding the whole message would turn
+    // `%20` inside a file URL into prose whitespace and prematurely end a token.
+    const input = value;
     let out = "";
     let i = 0;
     while (i < input.length) {
         const rest = input.slice(i);
         const file = rest.match(/^file:\/\//i);
-        const posix = rest.match(/^\/(?:[^\s/]+\/)+[^\s]*/);
+        const posix = rest.match(/^\/[^<>|;\n\r]+/);
         const drive = rest.match(/^[A-Za-z]:[\\/][^<>|;\n\r]*/);
         const unc = rest.match(/^\\\\[^\\/\s]+[\\/][^<>|;\n\r]*/);
         if (file && pathStart(input, i)) {
-            let end = consumePath(input, i);
-            const marker = [input.indexOf("?", i), input.indexOf("#", i)].filter((value) => value >= 0 && !/[<>|;\n\r"']/.test(input.slice(i, value))).sort((a, b) => a - b)[0];
-            if (marker !== undefined) {
-                end = marker;
-                while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? ""))
-                    end++;
-            }
-            while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? ""))
-                end++;
+            const end = consumePath(input, i, "url");
             out += "<redacted-path>";
             i = end;
             continue;
         }
         if ((posix || drive || unc) && pathStart(input, i)) {
-            const end = consumePath(input, i);
+            const end = consumePath(input, i, "path");
             out += "<redacted-path>";
             i = end;
             continue;
@@ -69,19 +75,33 @@ export function sanitize(value, limit = 2000) {
     }
     return out.slice(0, limit);
 }
-function safeRelativePath(raw, workspace) { let value = raw; try {
-    value = decodeURIComponent(value);
-}
-catch {
-    return undefined;
-} const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; if (value.startsWith("/")) {
-    if (!(value === root || value.startsWith(`${root}/`)))
+function safeRelativePath(raw, workspace) {
+    let value = raw;
+    try {
+        value = decodeURIComponent(value);
+    }
+    catch {
         return undefined;
-    value = value.slice(root.length + (value === root ? 0 : 1));
+    }
+    const root = resolve(workspace);
+    if (root === "/")
+        return undefined;
+    if (value.startsWith("/")) {
+        const candidate = resolve(value);
+        const relativePath = relative(root, candidate);
+        if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || relativePath.startsWith(sep))
+            return undefined;
+        value = relativePath;
+    }
+    else {
+        if (!value.includes("/") || !/\.[A-Za-z0-9]+$/.test(value))
+            return undefined;
+    }
+    const parts = value.replaceAll("\\", "/").split("/").filter(Boolean);
+    if (parts.includes("..") || parts.includes("."))
+        return undefined;
+    return parts.join("/") || undefined;
 }
-else if (!value.includes("/") || !/\.[A-Za-z0-9]+$/.test(value))
-    return undefined; const parts = value.replaceAll("\\", "/").split("/").filter(Boolean); if (parts.includes("..") || parts.includes("."))
-    return undefined; return parts.join("/") || undefined; }
 function parseLocation(value, workspace) { if (!value || typeof value !== "object")
     return undefined; const object = value; const raw = text(object.url) ?? text(object.path) ?? text(object.filePath); if (!raw)
     return undefined; let path = raw; let line = integer(object.lineNumber); let column = integer(object.columnNumber); if (raw.startsWith("file:")) {
@@ -89,9 +109,12 @@ function parseLocation(value, workspace) { if (!value || typeof value !== "objec
         const parsed = new URL(raw);
         if (parsed.protocol !== "file:")
             return undefined;
-        path = parsed.pathname + parsed.hash;
+        path = parsed.pathname;
         line = integer(Number(parsed.searchParams.get("StartingLineNumber"))) ?? line;
         column = integer(Number(parsed.searchParams.get("StartingColumnNumber"))) ?? column;
+        const fragmentQuery = parsed.hash.startsWith("#") ? new URLSearchParams(parsed.hash.slice(1)) : undefined;
+        line = integer(Number(fragmentQuery?.get("StartingLineNumber"))) ?? line;
+        column = integer(Number(fragmentQuery?.get("StartingColumnNumber"))) ?? column;
     }
     catch {
         return undefined;
@@ -103,8 +126,8 @@ function parseLocation(value, workspace) { if (!value || typeof value !== "objec
     column = integer(Number(query.get("StartingColumnNumber"))) ?? column;
 } const match = path.match(/^(.*?)(?::(\d+))?(?::(\d+))?$/); if (match?.[1]) {
     path = match[1];
-    line = match[2] ? Number(match[2]) : line;
-    column = match[3] ? Number(match[3]) : column;
+    line = match[2] ? integer(Number(match[2])) : line;
+    column = match[3] ? integer(Number(match[3])) : column;
 } const safePath = safeRelativePath(path, workspace); if (!safePath)
     return undefined; return { path: safePath, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) }; }
 function stableKey(record) { return createHash("sha256").update(JSON.stringify(record)).digest("hex"); }
@@ -135,26 +158,27 @@ async function runCommand(file, args, signal, maxBytes = MAX_JSON_BYTES) {
     return await new Promise((resolve, reject) => {
         const child = spawn(file, args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
         let stdout = "", stderr = "", tooLarge = false;
+        let killTimer;
+        let terminated = false;
+        const terminate = () => { if (terminated || !child.pid)
+            return; terminated = true; try {
+            process.kill(-child.pid, "SIGTERM");
+        }
+        catch { } killTimer = setTimeout(() => { try {
+            process.kill(-child.pid, "SIGKILL");
+        }
+        catch { } }, 250); };
         const append = (kind, chunk) => { const bytes = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length; if (Buffer.byteLength(kind === "stdout" ? stdout : stderr) + bytes > maxBytes) {
             tooLarge = true;
-            if (child.pid) {
-                try {
-                    process.kill(-child.pid, "SIGTERM");
-                }
-                catch { }
-            }
+            terminate();
             return;
         } if (kind === "stdout")
             stdout += chunk.toString();
         else
             stderr += chunk.toString(); };
-        const abort = () => { if (child.pid) {
-            try {
-                process.kill(-child.pid, "SIGTERM");
-            }
-            catch { }
-        } };
-        const cleanup = () => signal?.removeEventListener("abort", abort);
+        const abort = () => terminate();
+        const cleanup = () => { signal?.removeEventListener("abort", abort); if (killTimer && !terminated)
+            clearTimeout(killTimer); };
         child.stdout.on("data", (c) => append("stdout", c));
         child.stderr.on("data", (c) => append("stderr", c));
         child.once("error", (error) => { cleanup(); reject(error); });
@@ -177,8 +201,17 @@ catch (error) {
     return { state: "unavailable", detail: `result bundle unavailable: ${error instanceof Error ? error.message.slice(0, 120) : "read error"}` };
 } }
 async function readJSON(bundle, kind, signal) { const command = kind === "build-results" ? ["xcresulttool", "get", "build-results", "--schema-version", "0.4.0", "--path", bundle, "--compact"] : ["xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", bundle, "--compact"]; const { stdout } = await runCommand("xcrun", command, signal); return JSON.parse(stdout); }
-function redactedBundlePath(bundle, workspace) { const root = workspace.endsWith("/") ? workspace.slice(0, -1) : workspace; return bundle === root ? "<workspace>" : bundle.startsWith(`${root}/`) ? `<workspace>/${bundle.slice(root.length + 1)}` : "<result-bundle>"; }
-function safeError(error, bundle, workspace) { const message = error instanceof Error ? error.message.slice(0, 120) : "read error"; return message.replaceAll(bundle, redactedBundlePath(bundle, workspace)).replaceAll(/\/(?:Users|private|var|tmp)\/[^\s:]*/g, "<local-path>"); }
+function redactedBundlePath(bundle, workspace) {
+    const root = resolve(workspace);
+    if (root === "/")
+        return "<result-bundle>";
+    const candidate = resolve(bundle);
+    const relativePath = relative(root, candidate);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || relativePath.startsWith(sep))
+        return "<result-bundle>";
+    return `<workspace>/${relativePath.split(sep).join("/")}`;
+}
+function safeError(error, bundle, workspace) { const message = error instanceof Error ? error.message.slice(0, 120) : "read error"; const withBundle = message.replaceAll(bundle, redactedBundlePath(bundle, workspace)); return sanitize(withBundle, 120) ?? "read error"; }
 export async function readIssues(bundle, workspace, signal) { const provenanceBase = { bundle: { path: redactedBundlePath(bundle, workspace) }, tool: { command: ["xcrun", "xcresulttool", "get"], commands: [["xcrun", "xcresulttool", "get", "build-results", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"], ["xcrun", "xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", redactedBundlePath(bundle, workspace), "--compact"]], schema: ["build-results@0.4.0", "test-results@0.4.0"] }, git: { state: "unavailable" } }; try {
     const [build, tests, digest, git] = await Promise.all([readJSON(bundle, "build-results", signal), readJSON(bundle, "test-results", signal), bundleDigest(bundle, signal), readGitSnapshot(workspace, signal)]);
     const parsed = parseIssues(build, tests, workspace);

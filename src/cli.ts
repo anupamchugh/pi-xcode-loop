@@ -6,7 +6,7 @@ import { makeReceipt } from "./core/receipt.js";
 
 function help(): string { return "Usage: xcode-loop status --workspace <path> [--session <path>] [--result-bundle <path>] [--expect-tests <n>] [--json]\n       xcode-loop issues --workspace <path> --result-bundle <path> [--json]"; }
 const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
-function isSafePath(value: string): boolean { return safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
+function isSafePath(value: string): boolean { return value !== "/" && safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
 function parse(args: string[]) {
   const out: { workspace?: string; session?: string; result?: string; expected?: number; json: boolean } = { json: false };
   for (let i = 0; i < args.length; i++) { const arg = args[i]; if (arg === "--json") out.json = true; else if (["--workspace", "--session", "--result-bundle", "--expect-tests"].includes(arg ?? "")) { const value = args[++i]; if (!value) throw new Error(`${arg} requires a value`); if (arg === "--workspace" || arg === "--session" || arg === "--result-bundle") { if (!isSafePath(value)) throw new Error(`${arg} must be an absolute safe path`); if (arg === "--workspace") out.workspace = value; else if (arg === "--session") out.session = value; else out.result = value; } else { out.expected = Number(value); if (!Number.isInteger(out.expected) || out.expected < 0) throw new Error("--expect-tests must be a non-negative integer"); } } else throw new Error(`unknown option: ${arg}`); }
