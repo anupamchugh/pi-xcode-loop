@@ -1,0 +1,18 @@
+{
+  "name": "pi-xcode-loop",
+  "version": "0.1.0",
+  "type": "module",
+  "types": "./dist/src/core/index.d.ts",
+  "engines": { "node": ">=22.19.0" },
+  "bin": { "xcode-loop": "bin/xcode-loop" },
+  "exports": { ".": { "types": "./dist/src/core/index.d.ts", "import": "./dist/src/core/index.js" } },
+  "files": ["dist/src", "bin", "LICENSE", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "diff-check": "git diff --check && node bin/diff-check.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": { "@types/node": "^22.10.0", "typescript": "^5.7.2" }
+}
