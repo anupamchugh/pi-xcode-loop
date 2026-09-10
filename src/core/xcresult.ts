@@ -41,9 +41,8 @@ export function sanitize(value: string | undefined, limit = 2000): string | unde
     const unc = rest.match(/^\\\\[^\\/\s]+[\\/][^<>|;\n\r]*/);
     if (file && pathStart(input, i)) {
       let end = consumePath(input, i);
-      if (!/[.][A-Za-z0-9]{1,16}(?=$|[:\s])/.test(input.slice(i, end))) {
-        while (input[end] === " ") { const next = input.slice(end + 1).match(/^[^\s<>|;\n\r"']+/); if (!next) break; end += next[0].length + 1; }
-      }
+      const marker = [input.indexOf("?", i), input.indexOf("#", i)].filter((value) => value >= 0 && !/[<>|;\n\r"']/.test(input.slice(i, value))).sort((a, b) => a - b)[0];
+      if (marker !== undefined) { end = marker; while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? "")) end++; }
       while (end < input.length && !/[\s<>|;\n\r"']/.test(input[end] ?? "")) end++;
       out += "<redacted-path>"; i = end; continue;
     }
@@ -94,9 +93,10 @@ export async function bundleDigest(bundle: string, signal?: AbortSignal, limits:
       if (!item.isFile()) return;
       const rel = relative(bundle, path).split(sep).join("/"); const pathBytes = Buffer.from(rel);
       if (pathBytes.length > bound.maxPathBytes) throw new Error("result bundle digest path bound exceeded");
-      if (item.size > bound.maxBytes - bytes) throw new Error("result bundle digest byte bound exceeded"); bytes += item.size;
+      if (item.size > bound.maxBytes - bytes) throw new Error("result bundle digest byte bound exceeded");
       const header = Buffer.alloc(1 + 4 + 8); header.writeUInt8(1, 0); header.writeUInt32BE(pathBytes.length, 1); header.writeBigUInt64BE(BigInt(item.size), 5); hash.update(header); hash.update(pathBytes);
-      let actual = 0; await new Promise<void>((resolve, reject) => { const stream = createReadStream(path); const abort = () => stream.destroy(new Error("status cancelled")); signal?.addEventListener("abort", abort, { once: true }); stream.on("data", (chunk: string | Buffer) => { try { check(); actual += Buffer.byteLength(chunk); hash.update(chunk); } catch (e) { stream.destroy(e as Error); } }); stream.on("error", reject); stream.on("end", resolve); stream.on("close", () => signal?.removeEventListener("abort", abort)); });
+      let actual = 0; await new Promise<void>((resolve, reject) => { const stream = createReadStream(path); const abort = () => stream.destroy(new Error("status cancelled")); signal?.addEventListener("abort", abort, { once: true }); stream.on("data", (chunk: string | Buffer) => { try { check(); const size = Buffer.byteLength(chunk); if (actual + size > bound.maxBytes - bytes) throw new Error("result bundle digest byte bound exceeded"); actual += size; hash.update(chunk); } catch (e) { stream.destroy(e as Error); } }); stream.on("error", reject); stream.on("end", resolve); stream.on("close", () => signal?.removeEventListener("abort", abort)); });
+      bytes += actual;
       if (actual !== item.size) throw new Error("result bundle content changed during digest");
     }
     await visit(bundle, 0); check(); return { state: "present", digest: hash.digest("hex"), files: count, bytes };

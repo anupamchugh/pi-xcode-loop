@@ -117,6 +117,9 @@ test("path tokenizer redacts arbitrary roots and preserves prose", () => {
   const cases = [
     ["failed /mnt/Secret File.swift because parser stopped", "because parser stopped"],
     ["see /etc/passwd then retry", "then retry"],
+    ["file:///etc/secret?x first", "first"],
+    ["file:///etc/secret?x second", "second"],
+    ["file:///etc/Secret%20File#fragment first", "first"],
     ["file:///Users/a/Secret%20File.swift?token=private#x next", "next"],
     ["C:\\\\Users\\A\\Secret File.swift done", "done"],
     ["\\\\server\\share\\Secret File.swift done", "done"],
@@ -125,14 +128,27 @@ test("path tokenizer redacts arbitrary roots and preserves prose", () => {
   assert.notEqual(sanitize("error /mnt/a.swift:1"), sanitize("error /mnt/a.swift:2"));
 });
 
+test("digest framing distinguishes ambiguous path and content boundaries", async () => {
+  const first = await mkdtemp(join(tmpdir(), "xcode-loop-frame-a-")); const second = await mkdtemp(join(tmpdir(), "xcode-loop-frame-b-"));
+  await writeFile(join(first, "a"), "bc"); await writeFile(join(second, "ab"), "c");
+  const a = await bundleDigest(first); const b = await bundleDigest(second); assert.equal(a.state, "present"); assert.equal(b.state, "present"); assert.notEqual(a.digest, b.digest);
+});
+
 test("digest counts directories and exposes bounded typed outcomes", async () => {
   const root = await mkdtemp(join(tmpdir(), "xcode-loop-digest-"));
   await mkdir(join(root, "nested")); await writeFile(join(root, "nested", "one"), "one");
   const present = await bundleDigest(root); assert.equal(present.state, "present"); assert.equal(present.files, 3); assert.equal(present.bytes, 3); assert.match(present.digest ?? "", /^[0-9a-f]{64}$/);
   const breadth = await bundleDigest(root, undefined, { maxEntries: 2 }); assert.equal(breadth.state, "truncated");
+  const bytes = await bundleDigest(root, undefined, { maxBytes: 2 }); assert.equal(bytes.state, "truncated"); assert.match(bytes.reason ?? "", /byte bound/);
   const depth = await bundleDigest(root, undefined, { maxDepth: 0 }); assert.equal(depth.state, "truncated");
   const longPathRoot = await mkdtemp(join(tmpdir(), "xcode-loop-path-")); await writeFile(join(longPathRoot, "x".repeat(20)), "x");
   const longPath = await bundleDigest(longPathRoot, undefined, { maxPathBytes: 4 }); assert.equal(longPath.state, "truncated");
   const linkRoot = await mkdtemp(join(tmpdir(), "xcode-loop-link-")); await symlink(join(root, "nested", "one"), join(linkRoot, "link"));
   const rejected = await bundleDigest(linkRoot); assert.equal(rejected.state, "unavailable"); assert.match(rejected.reason ?? "", /symlink/);
+});
+
+test("mid-stream digest cancellation stops the read", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xcode-loop-cancel-")); await writeFile(join(root, "large"), Buffer.alloc(32 * 1024 * 1024, 7));
+  const controller = new AbortController(); const pending = bundleDigest(root, controller.signal); setImmediate(() => controller.abort());
+  await assert.rejects(pending, /status cancelled/);
 });
