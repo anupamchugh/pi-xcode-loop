@@ -48,9 +48,18 @@ export interface IssuesReceipt {
     };
 }
 export declare function parseResultSummary(stdout: string): ResultSummary;
+/** Redacts path tokens while retaining surrounding human prose. */
+export declare function sanitize(value: string | undefined, limit?: number): string | undefined;
 export declare function parseIssues(build: unknown, tests: unknown, workspace: string, options?: {
     maxRecords?: number;
 }): IssuesReceipt;
 export declare function readResultSummary(bundle: string, signal?: AbortSignal): Promise<ResultSummary>;
 export declare function readIssues(bundle: string, workspace: string, signal?: AbortSignal): Promise<IssuesReceipt>;
-export declare function bundleDigest(bundle: string, signal?: AbortSignal): Promise<DigestResult>;
+export interface DigestLimits {
+    maxEntries: number;
+    maxBytes: number;
+    maxDepth: number;
+    maxPathBytes: number;
+}
+export declare const DEFAULT_DIGEST_LIMITS: DigestLimits;
+export declare function bundleDigest(bundle: string, signal?: AbortSignal, limits?: Partial<DigestLimits>): Promise<DigestResult>;

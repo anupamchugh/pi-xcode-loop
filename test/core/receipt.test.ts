@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeReceipt } from "../../src/core/receipt.js";
 import { parseSessionLog, readSessionLog } from "../../src/core/parser.js";
-import { parseResultSummary, parseIssues } from "../../src/core/xcresult.js";
+import { parseResultSummary, parseIssues, sanitize, bundleDigest } from "../../src/core/xcresult.js";
 
 const git = { state: "present" as const, branch: "main", commit: "abc", dirty: false };
 
@@ -111,4 +111,28 @@ test("Xcode 27 schema fields and test failure nodes are collected", () => {
 test("all untrusted diagnostic fields redact paths and stay bounded", () => {
   const parsed = parseIssues({ errors: [{ issueType: "/opt/company/client.swift " + "x".repeat(5000), message: "file:///Users/alice/Secret%20Project/token.txt", targetName: "/Volumes/Private Disk/secret" }] }, undefined, "/Users/a/project");
   const output = JSON.stringify(parsed); assert.doesNotMatch(output, /Secret|Private Disk|company\/client|token\.txt/); assert.ok((parsed.records[0]?.type.length ?? 0) <= 256); assert.ok((parsed.records[0]?.message.length ?? 0) <= 2000);
+});
+
+test("path tokenizer redacts arbitrary roots and preserves prose", () => {
+  const cases = [
+    ["failed /mnt/Secret File.swift because parser stopped", "because parser stopped"],
+    ["see /etc/passwd then retry", "then retry"],
+    ["file:///Users/a/Secret%20File.swift?token=private#x next", "next"],
+    ["C:\\\\Users\\A\\Secret File.swift done", "done"],
+    ["\\\\server\\share\\Secret File.swift done", "done"],
+  ] as const;
+  for (const [input, prose] of cases) { const output = sanitize(input) ?? ""; assert.doesNotMatch(output, /Secret|passwd|token=private|Users|server\\share/); assert.match(output, new RegExp(prose)); }
+  assert.notEqual(sanitize("error /mnt/a.swift:1"), sanitize("error /mnt/a.swift:2"));
+});
+
+test("digest counts directories and exposes bounded typed outcomes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xcode-loop-digest-"));
+  await mkdir(join(root, "nested")); await writeFile(join(root, "nested", "one"), "one");
+  const present = await bundleDigest(root); assert.equal(present.state, "present"); assert.equal(present.files, 3); assert.equal(present.bytes, 3); assert.match(present.digest ?? "", /^[0-9a-f]{64}$/);
+  const breadth = await bundleDigest(root, undefined, { maxEntries: 2 }); assert.equal(breadth.state, "truncated");
+  const depth = await bundleDigest(root, undefined, { maxDepth: 0 }); assert.equal(depth.state, "truncated");
+  const longPathRoot = await mkdtemp(join(tmpdir(), "xcode-loop-path-")); await writeFile(join(longPathRoot, "x".repeat(20)), "x");
+  const longPath = await bundleDigest(longPathRoot, undefined, { maxPathBytes: 4 }); assert.equal(longPath.state, "truncated");
+  const linkRoot = await mkdtemp(join(tmpdir(), "xcode-loop-link-")); await symlink(join(root, "nested", "one"), join(linkRoot, "link"));
+  const rejected = await bundleDigest(linkRoot); assert.equal(rejected.state, "unavailable"); assert.match(rejected.reason ?? "", /symlink/);
 });
