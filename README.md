@@ -19,12 +19,14 @@ The observer does not edit source, run Git mutations, resume agents, drive Xcode
 
 ## Pi extension
 
-Install the package into Pi 0.85.1 or newer with `pi install npm:pi-xcode-loop`.
+Install the package into Pi 0.85.1 or newer with
+`pi install git:github.com/anupamchugh/pi-xcode-loop`.
 Then run `/xcode-loop status`; the command reads the current Pi working
 directory and session by default. Safe absolute paths may be supplied with
 `--workspace`, `--session`, or `--result-bundle`; `--expect-tests N` and
 `--json` are also supported. Remove the package with
-`pi remove npm:pi-xcode-loop` when it is no longer needed. The command never
+`pi remove git:github.com/anupamchugh/pi-xcode-loop` when it is no longer
+needed. The command never
 executes a command supplied through an argument and reports concise evidence
 when a session is unavailable, cancelled, or times out.
 
