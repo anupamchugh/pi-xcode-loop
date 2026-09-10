@@ -7,6 +7,7 @@ Evidence-first status receipts for Pi sessions running through Xcode Coding Inte
 The package provides:
 
 - a read-only `xcode-loop status` CLI
+- a read-only `xcode-loop issues` CLI for one explicit Xcode result bundle
 - a `/xcode-loop` Pi command
 - deterministic JSON receipts
 - fixture coverage for completed, cancelled, protocol-error, zero-test, and missing-evidence cases
@@ -39,6 +40,11 @@ The default Pi session adapter reads only bounded JSONL message metadata and
 maps the latest assistant stop reason to completion, cancellation, or failure.
 It does not infer test execution from Pi messages; an Xcode JSONL log or result
 bundle is required for test evidence.
+
+`xcode-loop issues --workspace PATH --result-bundle PATH --json` reads the
+supported Xcode 27 `build-results` and `test-results` JSON in one bundle. It
+emits bounded, deduplicated `pi-xcode-loop.issues.v1` records with stable keys,
+repository-relative locations, and redacted bundle, tool, and Git provenance.
 
 ## License
 

@@ -22,6 +22,12 @@ test("accepts only safe explicit flags and rejects injection-like arguments", ()
   assert.throws(() => parseArguments("status --session /owned/logs/../session.jsonl", "/tmp"), /absolute safe path/);
 });
 
+test("accepts the read-only issues command with an explicit result bundle", () => {
+  const options = parseArguments("issues --workspace /owned/project --result-bundle /owned/Tests.xcresult --json", "/tmp");
+  assert.equal(options.command, "issues");
+  assert.equal(options.result, "/owned/Tests.xcresult");
+});
+
 test("Pi JSONL counts malformed nonblank records and stays unknown", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xcode-loop-pi-"));
   const path = join(directory, "session.jsonl");

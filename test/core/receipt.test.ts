@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeReceipt } from "../../src/core/receipt.js";
 import { parseSessionLog, readSessionLog } from "../../src/core/parser.js";
-import { parseResultSummary } from "../../src/core/xcresult.js";
+import { parseResultSummary, parseIssues } from "../../src/core/xcresult.js";
 
 const git = { state: "present" as const, branch: "main", commit: "abc", dirty: false };
 
@@ -65,4 +65,37 @@ test("receipt accepts the xcresult summary field names", () => {
   const summary = parseResultSummary('{"title":"All tests","totalTestCount":4,"failedTests":1}');
   assert.deepEqual(summary, { state: "present", executed: 4, failed: 1 });
   assert.throws(() => parseResultSummary('{"totalTestCount":4,"failedTests":"1"}'), /invalid xcresult/);
+});
+
+test("issue parser emits build, analyzer, and test failures with stable redacted records", () => {
+  const parsed = parseIssues({
+    issues: [
+      { severity: "error", issueType: "compile", message: "bad thing", target: "GlintApp", documentLocation: { url: "file:///Users/alice/project/Sources/App.swift:12:4" } },
+      { severity: "warning", issueType: "warning", message: "bad thing", target: "GlintApp", documentLocation: { url: "file:///Users/alice/project/Sources/App.swift:12:4" } },
+    ],
+    analyzerIssues: [{ severity: "warning", issueType: "analyzer", message: "unused", target: "GlintApp", documentLocation: { url: "file:///Users/alice/project/Sources/Other.swift:3:2" } }],
+  }, {
+    testNodes: [{ name: "AppTests", tests: [{ name: "testFailure", testStatus: "Failure", failureSummaries: [{ message: "assertion failed", documentLocation: { url: "file:///Users/alice/project/Tests/AppTests.swift:8:1" } }] }] }],
+  }, "/Users/alice/project");
+  assert.equal(parsed.schema, "pi-xcode-loop.issues.v1");
+  assert.equal(parsed.records.length, 4);
+  assert.deepEqual(parsed.records.map(({ severity, type, target }) => ({ severity, type, target })), [
+    { severity: "error", type: "compile", target: "GlintApp" },
+    { severity: "warning", type: "warning", target: "GlintApp" },
+    { severity: "warning", type: "analyzer", target: "GlintApp" },
+    { severity: "error", type: "test-failure", target: "AppTests" },
+  ]);
+  assert.equal(parsed.records[0]?.location?.path, "Sources/App.swift");
+  assert.equal(parsed.records[3]?.location?.path, "Tests/AppTests.swift");
+  assert.doesNotMatch(JSON.stringify(parsed), /Users\/alice/);
+  assert.equal(parsed.records[0]?.key, parsed.records[1]?.key === parsed.records[0]?.key ? "" : parsed.records[0]?.key);
+});
+
+test("issue parser tolerates additive fields and malformed URLs, dedupes, and bounds output", () => {
+  const item = { severity: "warning", issueType: "warning", message: "same", target: "T", documentLocation: { url: "not-a-url" }, futureField: { secret: "/Users/alice/private" } };
+  const parsed = parseIssues({ issues: [item, item, { ...item, message: "other" }], unknown: [{ source: "/Users/alice/private" }] }, undefined, "/Users/alice/project", { maxRecords: 1 });
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0]?.location, undefined);
+  assert.equal(parsed.truncated, true);
+  assert.doesNotMatch(JSON.stringify(parsed), /Users\/alice|private/);
 });

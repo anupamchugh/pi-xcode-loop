@@ -4,6 +4,7 @@ import { open, stat } from "node:fs/promises";
 import type { ExtensionAPI } from "./pi-types.js";
 export declare const MAX_TIMEOUT_MS = 30000;
 interface Options {
+    command: "status" | "issues";
     workspace: string;
     session?: string;
     result?: string;
@@ -18,6 +19,7 @@ type PiSessionIO = {
 };
 export declare function readPiSession(path: string, signal: AbortSignal, io?: PiSessionIO): Promise<ReturnType<typeof parseSessionLog>>;
 export declare function runStatus(options: Options, signal: AbortSignal): Promise<ReturnType<typeof makeReceipt>>;
+export declare function runIssues(options: Options, signal: AbortSignal): Promise<import("../core/xcresult.js").IssuesReceipt>;
 export declare function withTimeout<T>(task: Promise<T>, timeoutMs: number, signal: AbortSignal, onTimeout: () => void): Promise<T>;
 export default function xcodeLoopExtension(pi: ExtensionAPI): void;
 export {};

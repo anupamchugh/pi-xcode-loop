@@ -1,20 +1,20 @@
 import { readGitSnapshot } from "../core/git.js";
 import { parseSessionLog, readSessionLog } from "../core/parser.js";
 import { makeReceipt } from "../core/receipt.js";
-import { readResultSummary } from "../core/xcresult.js";
+import { readResultSummary, readIssues } from "../core/xcresult.js";
 import { open, stat, type FileHandle } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionCommandContext } from "./pi-types.js";
 
 export const MAX_TIMEOUT_MS = 30_000; const MAX_SESSION_BYTES = 1_000_000;
 const safePath = /^\/[A-Za-z0-9._\-/ ]+$/;
 function isSafePath(value: string): boolean { return safePath.test(value) && !value.split("/").some((segment) => segment === "." || segment === ".."); }
-interface Options { workspace: string; session?: string; result?: string; expected?: number; json: boolean; piSession?: boolean; }
+interface Options { command: "status" | "issues"; workspace: string; session?: string; result?: string; expected?: number; json: boolean; piSession?: boolean; }
 export function parseArguments(args: string, cwd: string): Options {
   const tokens: string[] = []; let token = ""; let quote = "";
   for (const char of args.trim()) { if (quote) { if (char === quote) quote = ""; else token += char; } else if (char === "'" || char === '"') quote = char; else if (/\s/.test(char)) { if (token) { tokens.push(token); token = ""; } } else token += char; }
   if (quote) throw new Error("unterminated quoted argument"); if (token) tokens.push(token);
-  if (tokens[0] !== "status") throw new Error("usage: /xcode-loop status [--workspace PATH] [--session PATH] [--result-bundle PATH] [--expect-tests N] [--json]");
-  const out: Options = { workspace: cwd, json: false };
+  if (tokens[0] !== "status" && tokens[0] !== "issues") throw new Error("usage: /xcode-loop status|issues [--workspace PATH] [--session PATH] [--result-bundle PATH] [--expect-tests N] [--json]");
+  const out: Options = { command: tokens[0], workspace: cwd, json: false };
   for (let i = 1; i < tokens.length; i++) { const flag = tokens[i]; if (flag === "--json") out.json = true; else if (flag === "--workspace" || flag === "--session" || flag === "--result-bundle" || flag === "--expect-tests") { const value = tokens[++i]; if (!value || value.startsWith("-")) throw new Error(`${flag} requires a value`); if (flag === "--expect-tests") { const n = Number(value); if (!Number.isSafeInteger(n) || n < 0) throw new Error("--expect-tests must be a non-negative integer"); out.expected = n; } else { if (!isSafePath(value)) throw new Error(`${flag} must be an absolute safe path`); if (flag === "--workspace") out.workspace = value; else if (flag === "--session") out.session = value; else out.result = value; } } else throw new Error(`unknown argument: ${flag}`); }
   return out;
 }
@@ -82,12 +82,13 @@ export async function runStatus(options: Options, signal: AbortSignal): Promise<
   if (signal.aborted) throw new Error("status cancelled");
   return makeReceipt(options.workspace, options.session, session, git, result, options.expected);
 }
+export async function runIssues(options: Options, signal: AbortSignal) { if (!options.result) throw new Error("--result-bundle is required for issues"); return readIssues(options.result, options.workspace, signal); }
 export async function withTimeout<T>(task: Promise<T>, timeoutMs: number, signal: AbortSignal, onTimeout: () => void): Promise<T> { if (signal.aborted) throw new Error("status cancelled"); let timer: ReturnType<typeof setTimeout> | undefined; try { return await Promise.race([task, new Promise<T>((_, reject) => { timer = setTimeout(() => { onTimeout(); reject(new Error("status timed out")); }, timeoutMs); })]); } finally { if (timer) clearTimeout(timer); } }
 function publicJson(receipt: ReturnType<typeof makeReceipt>): string { return JSON.stringify({ ...receipt, workspace: "<workspace>", session: { ...receipt.session, path: receipt.session.path ? "<session>" : undefined }, git: { ...receipt.git, detail: receipt.git.detail ? "git unavailable" : undefined }, diagnostics: receipt.diagnostics.map((item) => item.includes("unavailable") ? "evidence unavailable" : item.includes("bound") ? "input exceeded bound" : "evidence warning") }); }
 export default function xcodeLoopExtension(pi: ExtensionAPI): void {
   pi.registerCommand("xcode-loop", { description: "Read-only Xcode loop evidence status", handler: async (args: string, ctx: ExtensionCommandContext) => {
     try { const hostSignal = ctx.signal; if (hostSignal?.aborted) { ctx.ui.notify("status cancelled", "error"); return; } const options = parseArguments(args, ctx.cwd); const session = options.session ?? ctx.sessionManager?.getSessionFile(); const effective = session ? { ...options, session, piSession: options.session === undefined } : options; const controller = new AbortController(); const cancel = () => controller.abort(); hostSignal?.addEventListener("abort", cancel, { once: true });
-      try { const receipt = await withTimeout(runStatus(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort()); ctx.ui.notify(effective.json ? publicJson(receipt) : `${receipt.verdict}: session=${receipt.session.state} git=${receipt.git.state} tests=${receipt.tests.state} (${receipt.tests.executed} executed)`, receipt.verdict === "failed" ? "error" : "info"); }
+      try { if (effective.command === "issues") { const issues = await withTimeout(runIssues(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort()); ctx.ui.notify(effective.json ? JSON.stringify(issues) : `issues: ${issues.records.length}${issues.truncated ? " (truncated)" : ""}`, issues.diagnostics.length ? "error" : "info"); } else { const receipt = await withTimeout(runStatus(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort()); ctx.ui.notify(effective.json ? publicJson(receipt) : `${receipt.verdict}: session=${receipt.session.state} git=${receipt.git.state} tests=${receipt.tests.state} (${receipt.tests.executed} executed)`, receipt.verdict === "failed" ? "error" : "info"); } }
       finally { hostSignal?.removeEventListener("abort", cancel); }
     } catch (error) { const message = error instanceof Error ? error.message : ""; const safe = message === "status cancelled" || message === "status timed out" || message.startsWith("usage:") || message.startsWith("unknown argument") || message.startsWith("--"); ctx.ui.notify(safe ? message : "xcode-loop status unavailable", "error"); }
   } });

@@ -1,7 +1,7 @@
 import { readGitSnapshot } from "../core/git.js";
 import { parseSessionLog, readSessionLog } from "../core/parser.js";
 import { makeReceipt } from "../core/receipt.js";
-import { readResultSummary } from "../core/xcresult.js";
+import { readResultSummary, readIssues } from "../core/xcresult.js";
 import { open, stat } from "node:fs/promises";
 export const MAX_TIMEOUT_MS = 30_000;
 const MAX_SESSION_BYTES = 1_000_000;
@@ -33,9 +33,9 @@ export function parseArguments(args, cwd) {
         throw new Error("unterminated quoted argument");
     if (token)
         tokens.push(token);
-    if (tokens[0] !== "status")
-        throw new Error("usage: /xcode-loop status [--workspace PATH] [--session PATH] [--result-bundle PATH] [--expect-tests N] [--json]");
-    const out = { workspace: cwd, json: false };
+    if (tokens[0] !== "status" && tokens[0] !== "issues")
+        throw new Error("usage: /xcode-loop status|issues [--workspace PATH] [--session PATH] [--result-bundle PATH] [--expect-tests N] [--json]");
+    const out = { command: tokens[0], workspace: cwd, json: false };
     for (let i = 1; i < tokens.length; i++) {
         const flag = tokens[i];
         if (flag === "--json")
@@ -161,6 +161,8 @@ export async function runStatus(options, signal) {
         throw new Error("status cancelled");
     return makeReceipt(options.workspace, options.session, session, git, result, options.expected);
 }
+export async function runIssues(options, signal) { if (!options.result)
+    throw new Error("--result-bundle is required for issues"); return readIssues(options.result, options.workspace, signal); }
 export async function withTimeout(task, timeoutMs, signal, onTimeout) { if (signal.aborted)
     throw new Error("status cancelled"); let timer; try {
     return await Promise.race([task, new Promise((_, reject) => { timer = setTimeout(() => { onTimeout(); reject(new Error("status timed out")); }, timeoutMs); })]);
@@ -185,8 +187,14 @@ export default function xcodeLoopExtension(pi) {
                 const cancel = () => controller.abort();
                 hostSignal?.addEventListener("abort", cancel, { once: true });
                 try {
-                    const receipt = await withTimeout(runStatus(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort());
-                    ctx.ui.notify(effective.json ? publicJson(receipt) : `${receipt.verdict}: session=${receipt.session.state} git=${receipt.git.state} tests=${receipt.tests.state} (${receipt.tests.executed} executed)`, receipt.verdict === "failed" ? "error" : "info");
+                    if (effective.command === "issues") {
+                        const issues = await withTimeout(runIssues(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort());
+                        ctx.ui.notify(effective.json ? JSON.stringify(issues) : `issues: ${issues.records.length}${issues.truncated ? " (truncated)" : ""}`, issues.diagnostics.length ? "error" : "info");
+                    }
+                    else {
+                        const receipt = await withTimeout(runStatus(effective, controller.signal), MAX_TIMEOUT_MS, controller.signal, () => controller.abort());
+                        ctx.ui.notify(effective.json ? publicJson(receipt) : `${receipt.verdict}: session=${receipt.session.state} git=${receipt.git.state} tests=${receipt.tests.state} (${receipt.tests.executed} executed)`, receipt.verdict === "failed" ? "error" : "info");
+                    }
                 }
                 finally {
                     hostSignal?.removeEventListener("abort", cancel);
