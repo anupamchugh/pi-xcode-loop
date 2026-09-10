@@ -2,14 +2,43 @@
   "name": "pi-xcode-loop",
   "version": "0.1.0",
   "type": "module",
-  "pi": { "extensions": ["./dist/src/pi/extension.js"] },
-  "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.85.1" },
-  "peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } },
+  "keywords": [
+    "pi-package",
+    "xcode",
+    "xcode-coding-intelligence"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/src/pi/extension.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.85.1"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
   "types": "./dist/src/core/index.d.ts",
-  "engines": { "node": ">=22.19.0" },
-  "bin": { "xcode-loop": "bin/xcode-loop" },
-  "exports": { ".": { "types": "./dist/src/core/index.d.ts", "import": "./dist/src/core/index.js" } },
-  "files": ["dist/src/pi", "dist/src/core", "bin", "LICENSE", "README.md"],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "xcode-loop": "bin/xcode-loop"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/core/index.d.ts",
+      "import": "./dist/src/core/index.js"
+    }
+  },
+  "files": [
+    "dist/src",
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test",
@@ -17,5 +46,8 @@
     "diff-check": "git diff --check && node bin/diff-check.mjs",
     "prepack": "npm run build"
   },
-  "devDependencies": { "@types/node": "^22.10.0", "typescript": "^5.7.2" }
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
 }

@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import extension, { parseArguments, withTimeout } from "../../src/pi/extension.js";
+import extension, { parseArguments, readPiSession, withTimeout } from "../../src/pi/extension.js";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("registers one fixed command and defaults workspace to cwd", () => {
   let registered: { name: string; handler: (args: string, ctx: any) => Promise<void> } | undefined;
@@ -15,6 +18,57 @@ test("accepts only safe explicit flags and rejects injection-like arguments", ()
   assert.throws(() => parseArguments("status --workspace /owned/project;touch", "/tmp"), /absolute safe path/);
   assert.throws(() => parseArguments("status --shell 'git status'", "/tmp"), /unknown argument/);
   assert.equal(parseArguments('status --workspace "/owned/project folder"', "/tmp").workspace, "/owned/project folder");
+  assert.throws(() => parseArguments("status --session /owned/./session.jsonl", "/tmp"), /absolute safe path/);
+  assert.throws(() => parseArguments("status --session /owned/logs/../session.jsonl", "/tmp"), /absolute safe path/);
+});
+
+test("Pi JSONL counts malformed nonblank records and stays unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xcode-loop-pi-"));
+  const path = join(directory, "session.jsonl");
+  await writeFile(path, '{"type":"message","message":{"role":"user"}}\nnot-json\n{"type":"message","message":{"role":"assistant","stopReason":"stop"}}\n');
+  const parsed = await readPiSession(path, new AbortController().signal);
+  assert.equal(parsed.completed, true);
+  assert.equal(parsed.malformedLines, 1);
+  assert.match(parsed.diagnostics.join(" "), /malformed Pi JSONL/);
+});
+
+test("Pi session read observes cancellation after I/O starts", async () => {
+  const controller = new AbortController();
+  let started = false;
+  const read = readPiSession("/owned/session.jsonl", controller.signal, {
+    stat: (async () => ({ isFile: () => true })) as any,
+    open: (async () => ({
+      read: async () => { started = true; return await new Promise<{ bytesRead: number }>(() => {}); },
+      close: async () => undefined,
+    })) as any,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(started, true);
+  controller.abort();
+  await assert.rejects(read, /status cancelled/);
+});
+
+test("late Pi open closes its handle once after cancellation", async () => {
+  const controller = new AbortController();
+  let resolveOpen!: (handle: any) => void;
+  let closeCount = 0;
+  let unhandledRejections = 0;
+  const onUnhandledRejection = () => { unhandledRejections++; };
+  let openStarted!: () => void;
+  const openStartedPromise = new Promise<void>((resolve) => { openStarted = resolve; });
+  const read = readPiSession("/owned/session.jsonl", controller.signal, {
+    stat: (async () => ({ isFile: () => true })) as any,
+    open: (() => { openStarted(); return new Promise((resolve) => { resolveOpen = resolve; }); }) as any,
+  });
+  await openStartedPromise;
+  process.on("unhandledRejection", onUnhandledRejection);
+  controller.abort();
+  resolveOpen({ close: async () => { closeCount++; throw new Error("close failed"); } });
+  await assert.rejects(read, /status cancelled/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  process.removeListener("unhandledRejection", onUnhandledRejection);
+  assert.equal(closeCount, 1);
+  assert.equal(unhandledRejections, 0);
 });
 
 test("timeout abort callback runs and returns promptly", async () => {
