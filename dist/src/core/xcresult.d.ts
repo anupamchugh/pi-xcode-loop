@@ -45,4 +45,4 @@ export declare function parseIssues(build: unknown, tests: unknown, workspace: s
 }): IssuesReceipt;
 export declare function readResultSummary(bundle: string, signal?: AbortSignal): Promise<ResultSummary>;
 export declare function readIssues(bundle: string, workspace: string, signal?: AbortSignal): Promise<IssuesReceipt>;
-export declare function bundleDigest(bundle: string): Promise<string | undefined>;
+export declare function bundleDigest(bundle: string, signal?: AbortSignal): Promise<string | undefined>;

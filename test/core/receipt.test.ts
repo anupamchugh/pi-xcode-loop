@@ -107,3 +107,8 @@ test("Xcode 27 schema fields and test failure nodes are collected", () => {
   assert.equal(parsed.records[0]?.location?.line, 7);
   assert.equal(parsed.records[2]?.type, "test-failure");
 });
+
+test("all untrusted diagnostic fields redact paths and stay bounded", () => {
+  const parsed = parseIssues({ errors: [{ issueType: "/opt/company/client.swift " + "x".repeat(5000), message: "file:///Users/alice/Secret%20Project/token.txt", targetName: "/Volumes/Private Disk/secret" }] }, undefined, "/Users/a/project");
+  const output = JSON.stringify(parsed); assert.doesNotMatch(output, /Secret|Private Disk|company\/client|token\.txt/); assert.ok((parsed.records[0]?.type.length ?? 0) <= 256); assert.ok((parsed.records[0]?.message.length ?? 0) <= 2000);
+});
